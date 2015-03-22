@@ -1,0 +1,190 @@
+---
+title: "Practical Machine Learning - Human Activity Recognition"
+author: "Tatjana TD"
+date: "Sunday, March 22, 2015"
+output: 
+    html_document:
+      fig_caption: yes
+---
+
+This is a report on classification of activity based on human activity recognision data. The source of this data is  <http://groupware.les.inf.puc-rio.br/har>. On this website, it is said that _six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions_:        
+- exactly according to the specification (Class A),   
+- throwing the elbows to the front (Class B),    
+- lifting the dumbbell only halfway (Class C),    
+- lowering the dumbbell only halfway (Class D) and    
+- throwing the hips to the front (Class E)   
+
+
+For the 6 participants data was collected from accelerometers on the belt, forearm, arm and dumbell.
+The participants perform barbell lifts and they perform it correctly and incorrectly.
+The investigated question is, if we can predict in which fashion the barbell lifts are performed at a specific point in time.
+ 
+
+```{r packages, echo=FALSE, message=FALSE, warning=FALSE}
+ library(caret)
+library(pgmm)
+library(tree)
+library(ggplot2)
+
+
+```
+
+In this report, the following analysis steps are performed.   
+* exploratory analysis, preprocessing   
+* feature creation, selection   
+* model building    
+* prediction accuracy   
+* accuracy of prediction on test data set    
+
+```{r toShow, echo=TRUE, eval=FALSE}
+library(caret)
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", "trainingdata.csv", quiet=TRUE)
+train <- read.csv("trainingdata.csv", header=T )
+## validation data set 
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", "testdata.csv", quiet=TRUE)
+testglobal <- read.csv("testdata.csv", header=T )
+```
+
+
+```{r, echo=FALSE}
+ 
+# file <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+ # download.file(file, "trainingdata.csv", quiet=TRUE)
+train <- read.csv("trainingdata.csv", header=T )
+#dim(train)  # 19622 x 160
+#head(train) 
+#file <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+# download.file(file, "testdata.csv", quiet=TRUE)
+testglobal <- read.csv("testdata.csv", header=T )
+#dim(testglobal)  #  20 x 160
+# names(testglobal)
+ 
+```
+
+
+## Exploratory analysis
+
+The training dataset contains $N_1$ =`r nrow(train)` observations and the test / validation dataset has only $N_2$= `r nrow(testglobal)` observations. 
+The six participants have more or less similar number of data rows.
+
+```{r personen, echo=TRUE, fig.cap="figure 1", fig.width=4, fig.height=4}
+table(train$user_name)
+table(train$classe ,train$user_name)
+str(train$classe)
+table(train$cvtd_timestamp, train$user_name)
+length(unique(train$cvtd_timestamp))  
+ 
+plot(train$accel_arm_x, col=train$classe, main="accel_arm_x with order A, B, C, D, E")
+```
+
+
+The data is sorted by time and the participant performed the different barbell lifting ways subsecuently.
+There are variables (e.g. cvtd_timestamp) in the data set that suggests a time series. However, for each of the 6 participants there are only 3 or 4 different time points and they are all on the same day in the same hour. Observations were made on 3 or 4 consecutive minutes, therefore the time effect cannot be very strong.
+
+```{r explo, echo=FALSE, fig.height=8, fig.width=4, fig.cap="figure 2"}
+
+#summary(train$cvtd_timestamp) # from 28/11/2011 to 5/12/2011
+
+# good seperation of the classes
+op <- par(mfrow=c(2,1), mar=c(4, 4, 2, 2) + 0.1)
+plot(train$yaw_belt, train$accel_belt_z, col=train$classe)
+legend("topright", col=1:5, legend=LETTERS[1:5], pch=15)
+plot(train$roll_belt, train$roll_forearm, col=train$classe)
+legend("top", col=1:5, legend=LETTERS[1:5], pch=15)
+par(op)
+```
+
+```{r explo2, echo=FALSE, fig.height=4, fig.width=4, fig.cap="figure 3"}
+plot(train$roll_belt, train$yaw_belt, col=train$classe, cex=0.7)
+legend("top", col=1:5, legend=LETTERS[1:5], pch=15)
+```
+
+
+## Preprocessing
+
+To reduce the number of predictors the function __nearZeroVar__ was applied. The variables with a small variance that got the value TRUE in the last column of the nsv data frame are removed from further considerations. Also, variables with a high amount of missing values are deleted.      
+Furthermore, by looking of figure 2 it can be seen that the time determined the activity. The participants conducted the lifting exercises in a certain order, but that is not the right information for predicting the type of activity. So all time variables were removed.
+
+
+```{r tidying, echo=TRUE, cache=TRUE}
+nsv <- nearZeroVar(train, saveMetrics=TRUE)
+head(nsv, 10)
+```
+
+```{r tidying2, echo=TRUE }
+# through out variables with near zero variance
+newnames <- rownames(nsv)[!nsv$nzv]; length(newnames)
+train <- train[, newnames]; dim(train)
+#### removing variables with more than 90% missing values
+missvars <- apply(train, 2, function(x) sum(is.na(x))/length(x))
+w <- which(missvars > .9);  
+newnames <- names(missvars[-w]); length(newnames) 
+newnames <- newnames[-c(1:6)] # also remove time variables 3:5
+train <- train[, newnames]
+names(train)
+```
+
+
+
+After these cleaning steps, only 53 predictor variables are left.
+
+For the cross validation, inside the training data 70 % of the data rows are randomly selected for training and the rest for testing the model.
+
+
+```{r splitting, echo=TRUE, message=FALSE, warning=FALSE}
+set.seed(44944)
+inTrain <- createDataPartition(y=train$classe, p=0.7, list=FALSE) 
+training <- train[inTrain, ]
+testing <- train[-inTrain,]
+dim(training); dim(testing)
+```
+
+## Feature selection
+
+It is not easy to say until now which of the 53 predictor variables are really important for prediction. Therefore, a first small random sample is used to train a random forest model and then to look at the variable importance.
+
+
+```{r selection, echo=TRUE, message=FALSE, warning=FALSE}
+inSelect <- sample(1:nrow(training), 1000, replace=FALSE)
+modfit <-  train(y=training$classe[inSelect], x=training[inSelect, -53],   trControl=trainControl(method="cv", number=3, repeats=2), tuneLength = 1) 
+best <- varImp(modfit)
+tab <- best$importance;    or <-order(tab$Overall, decreasing = TRUE)  
+tab$names <- rownames(tab)
+tab <- tab[or,]
+varnames <- tab$names[1:25] # first best 25 predictors
+varnames 
+  
+```
+
+
+Some variables suggest that they measure similar, like *magnet_belt_y* and *magnet_belt_z*. They correlate with almost 0.8.
+
+```{r lastExplore, echo=TRUE, fig.width=4, fig.height=4, fig.cap="figure 4"}
+cor(training$magnet_belt_y, training$magnet_belt_z)
+plot(training$magnet_belt_y, training$magnet_belt_z, col=train$classe, main="Magnet Belt")
+ 
+```
+
+From the figure 4 it can be seen, that only one (*magnet_belt_z*) of the two variables would suffice. 
+
+## model building
+
+```{r building, echo=TRUE, message=FALSE, warning=FALSE}
+modfit <-  train(y=training$classe, x=training[, varnames],   trControl=trainControl(method="cv", number=3, repeats=2), tuneLength = 1)
+modfit
+pr <- predict(modfit, newdata=testing[,varnames])
+confusionMatrix(table(pr, testing$classe))
+ 
+ 
+```
+
+ 
+
+
+## prediction on test data set
+
+```{r result, echo=FALSE}
+predTest <-  predict(modfit, testglobal[, varnames])
+data.frame(problem_id=testglobal$problem_id, predTest)
+```
+
